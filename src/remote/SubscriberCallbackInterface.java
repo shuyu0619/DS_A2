@@ -1,8 +1,8 @@
-package subscriber;
+package remote;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
 
 public interface SubscriberCallbackInterface extends Remote {
-    public void notifySubscriber(String message) throws RemoteException;
+    void notifySubscriber(String topicId, String message) throws RemoteException;
 }

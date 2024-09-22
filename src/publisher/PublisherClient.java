@@ -1,7 +1,9 @@
 package publisher;
 
-import broker.BrokerInterface;
-import java.rmi.Naming;
+import remote.BrokerInterface;
+
+import java.rmi.registry.LocateRegistry;
+import java.rmi.registry.Registry;
 import java.util.List;
 import java.util.Scanner;
 
@@ -14,8 +16,11 @@ public class PublisherClient {
         this.publisherName = publisherName;
         this.scanner = new Scanner(System.in);
         try {
-            // get broker service
-            broker = (BrokerInterface) Naming.lookup("rmi://localhost:1099/BrokerService");
+            //get RMI registry
+            Registry registry = LocateRegistry.getRegistry("localhost", 1099);
+
+            //find remote object
+            broker = (BrokerInterface) registry.lookup("BrokerService");
         } catch (Exception e) {
             System.err.println("Unable to connect to BrokerService: " + e.getMessage());
             System.exit(1);
@@ -72,7 +77,7 @@ public class PublisherClient {
         try {
             System.out.print("Enter topic ID: ");
             String topicId = scanner.nextLine();
-            System.out.println("Enter message content :");
+            System.out.println("Enter message content (type 'exit' to return to main menu):");
             while (true) {
                 String message = scanner.nextLine();
                 if ("exit".equalsIgnoreCase(message.trim())) {
@@ -81,7 +86,7 @@ public class PublisherClient {
                 }
                 broker.publishMessage(topicId, message, publisherName);
                 System.out.println("Message published: " + message);
-                System.out.println("Continue entering message content :");
+                System.out.println("Continue entering message content (or type 'exit' to return):");
             }
         } catch (Exception e) {
             System.err.println("Failed to publish message: " + e.getMessage());
@@ -105,7 +110,7 @@ public class PublisherClient {
     }
 
     public static void main(String[] args) {
-        // get publisher name
+        // Get publisher name
         Scanner scanner = new Scanner(System.in);
         System.out.print("Please enter your name: ");
         String publisherName = scanner.nextLine();

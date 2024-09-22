@@ -1,55 +1,70 @@
 package subscriber;
 
-import broker.BrokerInterface;
-import java.rmi.Naming;
-import java.rmi.RemoteException;
+import remote.BrokerInterface;
+import remote.SubscriberCallbackInterface;
+
+import java.rmi.registry.LocateRegistry;
+import java.rmi.registry.Registry;
 import java.util.List;
 import java.util.Scanner;
 
 public class SubscriberClient {
     public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
         try {
             // get subscriber name
-            Scanner scanner = new Scanner(System.in);
             System.out.print("Enter your name: ");
             String subscriberName = scanner.nextLine();
 
-            // get broker service
-            BrokerInterface broker = (BrokerInterface) Naming.lookup("rmi://localhost:1099/BrokerService");
+            // get RMI registry
+            Registry registry = LocateRegistry.getRegistry("localhost", 1099);
 
-            // create subscriber
+            // find remote object
+            BrokerInterface broker = (BrokerInterface) registry.lookup("BrokerService");
+
+            // create subscriber callback object
             SubscriberCallbackInterface callback = new SubscriberImpl(subscriberName);
 
-            // subscribe to topics
+            // main loop
             while (true) {
-                System.out.println("Commands: list, subscribe {topicId}, exit");
+                System.out.println("Commands: list, subscribe {topicId}, unsubscribe {topicId}, exit");
                 System.out.print("Enter command: ");
                 String input = scanner.nextLine();
 
-                if (input.equals("exit")) {
-                    break;
-                } else if (input.equals("list")) {
-                    List<String> topics = broker.listTopics();
-                    if (topics.isEmpty()) {
-                        System.out.println("No topics available.");
-                    } else {
-                        System.out.println("Available topics:");
-                        for (String topic : topics) {
-                            System.out.println("- " + topic);
+                try {
+                    if (input.equals("exit")) {
+                        break;
+                    } else if (input.equals("list")) {
+                        List<String> topics = broker.listTopics();
+                        if (topics.isEmpty()) {
+                            System.out.println("No topics available.");
+                        } else {
+                            System.out.println("Available topics:");
+                            for (String topic : topics) {
+                                System.out.println("- " + topic);
+                            }
                         }
+                    } else if (input.startsWith("subscribe ")) {
+                        String topicId = input.substring(10).trim();
+                        broker.subscribe(topicId, subscriberName, callback);
+                        System.out.println("Subscribed to topic: " + topicId);
+                    } else if (input.startsWith("unsubscribe ")) {
+                        String topicId = input.substring(12).trim();
+                        broker.unsubscribe(topicId, subscriberName);
+                        System.out.println("Unsubscribed from topic: " + topicId);
+                    } else {
+                        System.out.println("Invalid command.");
                     }
-                } else if (input.startsWith("subscribe ")) {
-                    String topicId = input.substring(10).trim();
-                    broker.subscribe(topicId, subscriberName, callback);
-                    System.out.println("Subscribed to topic: " + topicId);
-                } else {
-                    System.out.println("Invalid command.");
+                } catch (Exception e) {
+                    System.err.println("Error: " + e.getMessage());
                 }
             }
+        } catch (Exception e) {
+            System.err.println("Initialization error: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
             scanner.close();
             System.out.println("Subscriber exited.");
-        } catch (Exception e) {
-            e.printStackTrace();
         }
     }
 }

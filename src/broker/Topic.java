@@ -1,14 +1,15 @@
 package broker;
 
-import java.util.Set;
-import java.util.concurrent.CopyOnWriteArraySet;
-import subscriber.SubscriberCallbackInterface;
+import remote.SubscriberCallbackInterface;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Topic {
     private String topicId;
     private String topicName;
     private String publisherName;
-    private Set<SubscriberCallbackInterface> subscribers = new CopyOnWriteArraySet<>();
+    private Map<String, SubscriberCallbackInterface> subscribers = new ConcurrentHashMap<>();
 
     public Topic(String topicId, String topicName, String publisherName) {
         this.topicId = topicId;
@@ -28,27 +29,22 @@ public class Topic {
         return publisherName;
     }
 
-    public Set<SubscriberCallbackInterface> getSubscribers() {
-        return subscribers;
+    public void addSubscriber(String subscriberName, SubscriberCallbackInterface subscriber) {
+        subscribers.put(subscriberName, subscriber);
     }
 
-    public void addSubscriber(SubscriberCallbackInterface subscriber) {
-        subscribers.add(subscriber);
-    }
-
-    public void removeSubscriber(SubscriberCallbackInterface subscriber) {
-        subscribers.remove(subscriber);
+    public void removeSubscriber(String subscriberName) {
+        subscribers.remove(subscriberName);
     }
 
     public void publishMessage(String message) {
-        for (SubscriberCallbackInterface subscriber : subscribers) {
+        subscribers.forEach((name, subscriber) -> {
             try {
-                subscriber.notifySubscriber(message);
+                subscriber.notifySubscriber(topicId, message);
             } catch (Exception e) {
-                System.err.println("Error notifying subscriber: " + e.getMessage());
-                subscribers.remove(subscriber); // remove subscriber if an error occurs
+                System.err.println("Error notifying subscriber " + name + ": " + e.getMessage());
+                subscribers.remove(name);
             }
-        }
+        });
     }
-
 }
