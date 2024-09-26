@@ -13,6 +13,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
 
     private ConcurrentHashMap<String, Topic> topics = new ConcurrentHashMap<>();
     private ConcurrentHashMap<String, Set<String>> subscriberTopics = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String, Set<String>> publisherTopics = new ConcurrentHashMap<>();
 
     public BrokerImpl() throws RemoteException {
         super();
@@ -24,6 +25,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic already exists: " + topicId);
         }
         topics.put(topicId, new Topic(topicId, topicName, publisherName));
+        publisherTopics.computeIfAbsent(publisherName, k -> new HashSet<>()).add(topicId);
     }
 
     @Override
@@ -33,7 +35,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic not found: " + topicId);
         }
         if (!topic.getPublisherName().equals(publisherName)) {
-            throw new RemoteException("Unauthorized publisher: " + publisherName);
+            throw new RemoteException("Unauthorized: Publisher " + publisherName + " cannot publish to topic " + topicId);
         }
         topic.publishMessage(message);
     }
@@ -65,6 +67,9 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
         Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
         if (subscribedTopics != null) {
             subscribedTopics.remove(topicId);
+            if (subscribedTopics.isEmpty()) {
+                subscriberTopics.remove(subscriberName);
+            }
         }
     }
 
@@ -76,7 +81,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic not found: " + topicId);
         }
         if (!topic.getPublisherName().equals(publisherName)) {
-            throw new RemoteException("Unauthorized publisher: " + publisherName);
+            throw new RemoteException("Unauthorized: Publisher " + publisherName + " cannot access topic " + topicId);
         }
         result.add(topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getSubscriberCount());
         return result;
@@ -89,13 +94,16 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic not found: " + topicId);
         }
         if (!topic.getPublisherName().equals(publisherName)) {
-            throw new RemoteException("Unauthorized publisher: " + publisherName);
+            throw new RemoteException("Unauthorized: Publisher " + publisherName + " cannot delete topic " + topicId);
         }
         topics.remove(topicId);
+        publisherTopics.get(publisherName).remove(topicId);
         // Remove this topic from all subscribers
         for (Set<String> subscribedTopics : subscriberTopics.values()) {
             subscribedTopics.remove(topicId);
         }
+        // Remove empty subscriber entries
+        subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
     }
 
     @Override
