@@ -5,13 +5,14 @@ import remote.SubscriberCallbackInterface;
 
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
 
     private ConcurrentHashMap<String, Topic> topics = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String, Set<String>> subscriberTopics = new ConcurrentHashMap<>();
 
     public BrokerImpl() throws RemoteException {
         super();
@@ -21,31 +22,26 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     public synchronized void createTopic(String topicId, String topicName, String publisherName) throws RemoteException {
         if (topics.containsKey(topicId)) {
             throw new RemoteException("Topic already exists: " + topicId);
-        } else {
-            topics.put(topicId, new Topic(topicId, topicName, publisherName));
-            System.out.println("Topic created: " + topicId);
         }
+        topics.put(topicId, new Topic(topicId, topicName, publisherName));
     }
 
     @Override
     public synchronized void publishMessage(String topicId, String message, String publisherName) throws RemoteException {
         Topic topic = topics.get(topicId);
-        if (topic != null) {
-            // Check if the publisher is authorized to publish to this topic
-            if (!topic.getPublisherName().equals(publisherName)) {
-                throw new RemoteException("Unauthorized publisher: " + publisherName);
-            }
-            topic.publishMessage(message);
-            System.out.println("Message published to topic: " + topicId);
-        } else {
+        if (topic == null) {
             throw new RemoteException("Topic not found: " + topicId);
         }
+        if (!topic.getPublisherName().equals(publisherName)) {
+            throw new RemoteException("Unauthorized publisher: " + publisherName);
+        }
+        topic.publishMessage(message);
     }
 
     @Override
     public List<String> listTopics() throws RemoteException {
         return topics.values().stream()
-                .map(topic -> topic.getTopicId() + ": " + topic.getTopicName())
+                .map(topic -> topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName())
                 .collect(Collectors.toList());
     }
 
@@ -56,7 +52,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic not found: " + topicId);
         }
         topic.addSubscriber(subscriberName, subscriber);
-        System.out.println("Subscriber " + subscriberName + " subscribed to topic: " + topicId);
+        subscriberTopics.computeIfAbsent(subscriberName, k -> new HashSet<>()).add(topicId);
     }
 
     @Override
@@ -66,6 +62,53 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             throw new RemoteException("Topic not found: " + topicId);
         }
         topic.removeSubscriber(subscriberName);
-        System.out.println("Subscriber " + subscriberName + " unsubscribed from topic: " + topicId);
+        Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
+        if (subscribedTopics != null) {
+            subscribedTopics.remove(topicId);
+        }
+    }
+
+    @Override
+    public List<String> getSubscriberCount(String topicId, String publisherName) throws RemoteException {
+        List<String> result = new ArrayList<>();
+        Topic topic = topics.get(topicId);
+        if (topic == null) {
+            throw new RemoteException("Topic not found: " + topicId);
+        }
+        if (!topic.getPublisherName().equals(publisherName)) {
+            throw new RemoteException("Unauthorized publisher: " + publisherName);
+        }
+        result.add(topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getSubscriberCount());
+        return result;
+    }
+
+    @Override
+    public synchronized void deleteTopic(String topicId, String publisherName) throws RemoteException {
+        Topic topic = topics.get(topicId);
+        if (topic == null) {
+            throw new RemoteException("Topic not found: " + topicId);
+        }
+        if (!topic.getPublisherName().equals(publisherName)) {
+            throw new RemoteException("Unauthorized publisher: " + publisherName);
+        }
+        topics.remove(topicId);
+        // Remove this topic from all subscribers
+        for (Set<String> subscribedTopics : subscriberTopics.values()) {
+            subscribedTopics.remove(topicId);
+        }
+    }
+
+    @Override
+    public List<String> getCurrentSubscriptions(String subscriberName) throws RemoteException {
+        Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
+        if (subscribedTopics == null || subscribedTopics.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return subscribedTopics.stream()
+                .map(topicId -> {
+                    Topic topic = topics.get(topicId);
+                    return topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
+                })
+                .collect(Collectors.toList());
     }
 }

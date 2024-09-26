@@ -40,11 +40,15 @@ public class Topic {
     public void publishMessage(String message) {
         subscribers.forEach((name, subscriber) -> {
             try {
-                subscriber.notifySubscriber(topicId, message);
+                subscriber.notifySubscriber(topicId, topicName, publisherName, message);
             } catch (Exception e) {
                 System.err.println("Error notifying subscriber " + name + ": " + e.getMessage());
                 subscribers.remove(name);
             }
         });
+    }
+
+    public int getSubscriberCount() {
+        return subscribers.size();
     }
 }

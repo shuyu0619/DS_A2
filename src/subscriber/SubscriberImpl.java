@@ -16,8 +16,8 @@ public class SubscriberImpl extends UnicastRemoteObject implements SubscriberCal
     }
 
     @Override
-    public void notifySubscriber(String topicId, String message) throws RemoteException {
-        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
-        System.out.println("[" + timestamp + "] [" + subscriberName + "] Message from topic [" + topicId + "]: " + message);
+    public void notifySubscriber(String topicId, String topicName, String publisherName, String message) throws RemoteException {
+        String timestamp = new SimpleDateFormat("dd/MM HH:mm:ss").format(new Date());
+        System.out.println("[" + timestamp + "] [" + topicId + ":" + topicName + ":] [" + message + "]");
     }
 }
