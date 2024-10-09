@@ -1,38 +1,47 @@
 package publisher;
 
 import remote.BrokerInterface;
+import remote.DirectoryServiceInterface;
+import remote.BrokerInfo;
 
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
-import java.rmi.RemoteException;
 import java.util.Scanner;
 import java.util.List;
-import java.util.logging.Logger;
-import java.util.logging.Level;
+import java.util.Random;
 
-/**
- * PublisherClient allows publishers to interact with the broker.
- */
 public class PublisherClient {
-    private static final Logger logger = Logger.getLogger(PublisherClient.class.getName());
-
     private final String publisherName;
     private BrokerInterface broker;
     private final Scanner scanner;
 
-    public PublisherClient(String publisherName, String brokerIp, int brokerPort) {
+    public PublisherClient(String publisherName, String directoryIp, int directoryPort) {
         this.publisherName = publisherName;
         this.scanner = new Scanner(System.in);
-        try {
-            Registry registry = LocateRegistry.getRegistry(brokerIp, brokerPort);
+        connectToBroker(directoryIp, directoryPort);
+    }
 
-            // Service name is "BrokerService_<port>"
-            String serviceName = "BrokerService_" + brokerPort;
+    private void connectToBroker(String directoryIp, int directoryPort) {
+        try {
+            Registry directoryRegistry = LocateRegistry.getRegistry(directoryIp, directoryPort);
+            DirectoryServiceInterface directoryService = (DirectoryServiceInterface) directoryRegistry.lookup("DirectoryService");
+
+            List<BrokerInfo> brokers = directoryService.getBrokerList();
+            if (brokers.isEmpty()) {
+                System.err.println("No brokers available.");
+                System.exit(1);
+            }
+
+            Random rand = new Random();
+            BrokerInfo brokerInfo = brokers.get(rand.nextInt(brokers.size()));
+
+            Registry registry = LocateRegistry.getRegistry(brokerInfo.getIp(), brokerInfo.getPort());
+            String serviceName = "BrokerService_" + brokerInfo.getPort();
             broker = (BrokerInterface) registry.lookup(serviceName);
-            logger.info("Connected to BrokerService at " + brokerIp + ":" + brokerPort);
-            System.out.println("Connected to BrokerService at " + brokerIp + ":" + brokerPort);
+
+            System.out.println("Connected to BrokerService at " + brokerInfo.getIp() + ":" + brokerInfo.getPort());
+
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Unable to connect to BrokerService: {0}", e.getMessage());
             System.err.println("Unable to connect to BrokerService: " + e.getMessage());
             System.exit(1);
         }
@@ -40,131 +49,92 @@ public class PublisherClient {
 
     public void start() {
         while (true) {
-            displayMenu();
-            String command = scanner.nextLine().trim();
-
+            System.out.println("Please select command: create, publish, show, delete.");
+            String commandLine = scanner.nextLine().trim();
+            String[] parts = commandLine.split("\\s+", 3);
+            if (parts.length == 0) {
+                System.out.println("error: Invalid command.");
+                continue;
+            }
+            String command = parts[0];
             try {
                 switch (command.toLowerCase()) {
                     case "create":
-                        createTopic();
+                        if (parts.length != 3) {
+                            System.out.println("error: Invalid command format.");
+                            break;
+                        }
+                        createTopic(parts[1], parts[2]);
                         break;
                     case "publish":
-                        publishMessage();
+                        if (parts.length != 3) {
+                            System.out.println("error: Invalid command format.");
+                            break;
+                        }
+                        publishMessage(parts[1], parts[2]);
                         break;
                     case "show":
-                        showSubscriberCount();
+                        if (parts.length != 2) {
+                            System.out.println("error: Invalid command format.");
+                            break;
+                        }
+                        showSubscriberCount(parts[1]);
                         break;
                     case "delete":
-                        deleteTopic();
+                        if (parts.length != 2) {
+                            System.out.println("error: Invalid command format.");
+                            break;
+                        }
+                        deleteTopic(parts[1]);
                         break;
                     case "exit":
-                        System.out.println("Exiting publisher.");
-                        logger.info("Publisher " + publisherName + " is exiting.");
                         return;
                     default:
                         System.out.println("error: Invalid command.");
-                        logger.warning("Invalid command entered: " + command);
                 }
-            } catch (RemoteException e) {
-                System.out.println("error: Remote operation failed: " + e.getMessage());
-                logger.log(Level.SEVERE, "Remote operation failed: {0}", e.getMessage());
-            } catch (IllegalArgumentException e) {
-                System.out.println("error: " + e.getMessage());
-                logger.warning("Invalid input: " + e.getMessage());
             } catch (Exception e) {
-                System.out.println("error: An unexpected error occurred: " + e.getMessage());
-                logger.log(Level.SEVERE, "Unexpected error: {0}", e.getMessage());
+                System.out.println("error: " + e.getMessage());
             }
         }
     }
 
-    private void displayMenu() {
-        System.out.println("\nPlease select command: create, publish, show, delete.");
-        System.out.print("Enter command: ");
+    private void createTopic(String topicId, String topicName) throws Exception {
+        String result = broker.createTopic(topicId, topicName, publisherName);
+        System.out.println("[" + result + "]");
     }
 
-    private void createTopic() throws RemoteException {
-        System.out.print("Enter topic ID: ");
-        String topicId = scanner.nextLine().trim();
-        System.out.print("Enter topic name: ");
-        String topicName = scanner.nextLine().trim();
-
-        if (topicId.isEmpty() || topicName.isEmpty()) {
-            throw new IllegalArgumentException("Topic ID and name cannot be empty.");
-        }
-
-        broker.createTopic(topicId, topicName, publisherName);
-        System.out.println("success");
-        logger.info("Created topic " + topicId + " - " + topicName);
+    private void publishMessage(String topicId, String message) throws Exception {
+        String result = broker.publishMessage(topicId, message, publisherName);
+        System.out.println("[" + result + "]");
     }
 
-    private void publishMessage() throws RemoteException {
-        System.out.print("Enter topic ID: ");
-        String topicId = scanner.nextLine().trim();
-        System.out.print("Enter message: ");
-        String message = scanner.nextLine().trim();
-
-        if (message.isEmpty()) {
-            throw new IllegalArgumentException("Message cannot be empty.");
-        }
-        if (message.length() > 100) {
-            throw new IllegalArgumentException("Message exceeds 100 characters.");
-        }
-
-        broker.publishMessage(topicId, message, publisherName);
-        System.out.println("success");
-        logger.info("Published message to topic " + topicId + ": " + message);
-    }
-
-    private void showSubscriberCount() throws RemoteException {
-        System.out.print("Enter topic ID: ");
-        String topicId = scanner.nextLine().trim();
-
-        if (topicId.isEmpty()) {
-            throw new IllegalArgumentException("Topic ID cannot be empty.");
-        }
-
+    private void showSubscriberCount(String topicId) throws Exception {
         List<String> topicInfo = broker.getSubscriberCount(topicId, publisherName);
         if (topicInfo.isEmpty()) {
             System.out.println("[No subscribers]");
         } else {
             for (String info : topicInfo) {
-                System.out.println("[" + info + "]");
+                String[] parts = info.split("\\s+");
+                System.out.println("[" + parts[0] + "] [" + parts[1] + "] [" + parts[2] + "]");
             }
         }
-        logger.info("Displayed subscriber count for topic " + topicId);
     }
 
-    private void deleteTopic() throws RemoteException {
-        System.out.print("Enter topic ID: ");
-        String topicId = scanner.nextLine().trim();
-
-        if (topicId.isEmpty()) {
-            throw new IllegalArgumentException("Topic ID cannot be empty.");
-        }
-
-        broker.deleteTopic(topicId, publisherName);
-        System.out.println("success");
-        logger.info("Deleted topic " + topicId);
+    private void deleteTopic(String topicId) throws Exception {
+        String result = broker.deleteTopic(topicId, publisherName);
+        System.out.println("[" + result + "]");
     }
 
     public static void main(String[] args) {
         if (args.length != 3) {
-            System.out.println("Usage: java -jar publisher.jar <username> <broker_ip> <broker_port>");
+            System.out.println("Usage: java -jar publisher.jar <username> <directory_ip> <directory_port>");
             System.exit(1);
         }
-
         String publisherName = args[0];
-        String brokerIp = args[1];
-        int brokerPort;
-        try {
-            brokerPort = Integer.parseInt(args[2]);
-        } catch (NumberFormatException e) {
-            System.out.println("error: Broker port must be a valid integer.");
-            return;
-        }
+        String directoryIp = args[1];
+        int directoryPort = Integer.parseInt(args[2]);
 
-        PublisherClient client = new PublisherClient(publisherName, brokerIp, brokerPort);
+        PublisherClient client = new PublisherClient(publisherName, directoryIp, directoryPort);
         client.start();
     }
 }

@@ -31,4 +31,7 @@ public interface BrokerInterface extends Remote {
     String getBrokerIdentifier() throws RemoteException;
     int getLocalSubscriberCount(String topicId) throws RemoteException;
     List<String> getKnownBrokers() throws RemoteException;
+    List<String> getAllTopics() throws RemoteException;
+    String getTopicInfo(String topicId) throws RemoteException;
+    void registerNewBroker(String brokerId, String ip, int port) throws RemoteException;
 }
