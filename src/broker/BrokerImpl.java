@@ -17,11 +17,16 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
 
     private final String brokerIdentifier;
     private final DirectoryServiceInterface directoryService;
+
     private final ConcurrentHashMap<String, Topic> topics = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> subscriberTopics = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> publisherTopics = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> topicSubscribersOnBrokers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BrokerInterface> otherBrokers = new ConcurrentHashMap<>();
+
+    private final ConcurrentHashMap<String, Long> publisherHeartbeats = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> subscriberHeartbeats = new ConcurrentHashMap<>();
+
     private List<BrokerInfo> initialBrokerList;
 
     public BrokerImpl(int currentPort, String directoryIp, int directoryPort) throws RemoteException {
@@ -33,9 +38,10 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
             Registry directoryRegistry = LocateRegistry.getRegistry(directoryIp, directoryPort);
             directoryService = (DirectoryServiceInterface) directoryRegistry.lookup("DirectoryService");
 
-
             initialBrokerList = directoryService.registerAndGetBrokerList(brokerIdentifier, hostname, currentPort);
 
+            startPublisherHeartbeatChecker();
+            startSubscriberHeartbeatChecker();
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -53,7 +59,6 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
                         BrokerInterface otherBroker = (BrokerInterface) otherRegistry.lookup(otherServiceName);
                         otherBrokers.put(brokerInfo.getBrokerId(), otherBroker);
 
-
                         List<String> otherTopics = otherBroker.getAllTopics();
                         for (String topicInfo : otherTopics) {
                             String[] parts = topicInfo.split("\\s+");
@@ -61,10 +66,9 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
                             String topicName = parts[1];
                             String publisherName = parts[2];
                             if (!topics.containsKey(topicId)) {
-                                topics.put(topicId, new Topic(topicId, topicName, publisherName));
+                                topics.put(topicId, new Topic(topicId, topicName, publisherName, this));
                             }
                         }
-
 
                         otherBroker.registerNewBroker(brokerIdentifier, InetAddress.getLocalHost().getHostAddress(), getPortFromIdentifier(brokerIdentifier));
 
@@ -93,7 +97,6 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
                 otherBrokers.put(brokerId, broker);
                 System.out.println("Registered new broker: " + brokerId);
 
-
                 List<String> otherTopics = broker.getAllTopics();
                 for (String topicInfo : otherTopics) {
                     String[] parts = topicInfo.split("\\s+");
@@ -101,7 +104,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
                     String topicName = parts[1];
                     String publisherName = parts[2];
                     if (!topics.containsKey(topicId)) {
-                        topics.put(topicId, new Topic(topicId, topicName, publisherName));
+                        topics.put(topicId, new Topic(topicId, topicName, publisherName, this));
                     }
                 }
 
@@ -112,13 +115,17 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized String createTopic(String topicId, String topicName, String publisherName) throws RemoteException {
-        if (topics.containsKey(topicId)) {
-            return "error: Topic already exists: " + topicId;
+    public String createTopic(String topicId, String topicName, String publisherName) throws RemoteException {
+        checkPublisher(publisherName);
+
+        synchronized (this) {
+            if (topics.containsKey(topicId)) {
+                return "error: Topic already exists: " + topicId;
+            }
+            Topic topic = new Topic(topicId, topicName, publisherName, this);
+            topics.put(topicId, topic);
+            publisherTopics.computeIfAbsent(publisherName, k -> ConcurrentHashMap.newKeySet()).add(topicId);
         }
-        Topic topic = new Topic(topicId, topicName, publisherName);
-        topics.put(topicId, topic);
-        publisherTopics.computeIfAbsent(publisherName, k -> ConcurrentHashMap.newKeySet()).add(topicId);
         synchronizeTopicWithOthers(topicId, topicName, publisherName);
         return "success";
     }
@@ -136,20 +143,25 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     @Override
     public synchronized void synchronizeTopic(String topicId, String topicName, String publisherName) throws RemoteException {
         if (!topics.containsKey(topicId)) {
-            Topic topic = new Topic(topicId, topicName, publisherName);
+            Topic topic = new Topic(topicId, topicName, publisherName, this);
             topics.put(topicId, topic);
             publisherTopics.computeIfAbsent(publisherName, k -> ConcurrentHashMap.newKeySet()).add(topicId);
         }
     }
 
     @Override
-    public synchronized String publishMessage(String topicId, String message, String publisherName) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-            return "error: Topic not found: " + topicId;
-        }
-        if (!topic.getPublisherName().equals(publisherName)) {
-            return "error: Unauthorized publisher: " + publisherName;
+    public String publishMessage(String topicId, String message, String publisherName) throws RemoteException {
+        checkPublisher(publisherName);
+
+        Topic topic;
+        synchronized (this) {
+            topic = topics.get(topicId);
+            if (topic == null) {
+                return "error: Topic not found: " + topicId;
+            }
+            if (!topic.getPublisherName().equals(publisherName)) {
+                return "error: Unauthorized publisher: " + publisherName;
+            }
         }
         topic.publishMessage(message);
         forwardMessageToOthers(topicId, message, publisherName);
@@ -175,20 +187,22 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized void forwardMessage(String topicId, String message, String publisherName) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-
-            String topicInfo = getTopicInfoFromOtherBrokers(topicId);
-            if (topicInfo != null) {
-                String[] parts = topicInfo.split("\\s+");
-                String topicName = parts[1];
-                String publisher = parts[2];
-                topic = new Topic(topicId, topicName, publisher);
-                topics.put(topicId, topic);
-            } else {
-                System.err.println("Failed to get topic info for topicId: " + topicId);
-                return;
+    public void forwardMessage(String topicId, String message, String publisherName) throws RemoteException {
+        Topic topic;
+        synchronized (this) {
+            topic = topics.get(topicId);
+            if (topic == null) {
+                String topicInfo = getTopicInfoFromOtherBrokers(topicId);
+                if (topicInfo != null) {
+                    String[] parts = topicInfo.split("\\s+");
+                    String topicName = parts[1];
+                    String publisher = parts[2];
+                    topic = new Topic(topicId, topicName, publisher, this);
+                    topics.put(topicId, topic);
+                } else {
+                    System.err.println("Failed to get topic info for topicId: " + topicId);
+                    return;
+                }
             }
         }
         topic.publishMessage(message);
@@ -209,14 +223,16 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized List<String> listTopics() throws RemoteException {
+    public List<String> listTopics() throws RemoteException {
         Set<String> seenTopics = new HashSet<>();
         List<String> topicList = new ArrayList<>();
 
-        for (Topic topic : topics.values()) {
-            String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
-            topicList.add(entry);
-            seenTopics.add(topic.getTopicId());
+        synchronized (this) {
+            for (Topic topic : topics.values()) {
+                String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
+                topicList.add(entry);
+                seenTopics.add(topic.getTopicId());
+            }
         }
 
         for (BrokerInterface broker : otherBrokers.values()) {
@@ -238,54 +254,76 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized String subscribe(String topicId, String subscriberName, SubscriberCallbackInterface subscriber) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-
-            String topicInfo = getTopicInfoFromOtherBrokers(topicId);
-            if (topicInfo != null) {
-                String[] parts = topicInfo.split("\\s+");
-                String topicName = parts[1];
-                String publisherName = parts[2];
-                topic = new Topic(topicId, topicName, publisherName);
-                topics.put(topicId, topic);
-            } else {
-                return "error: Topic not found: " + topicId;
+    public String subscribe(String topicId, String subscriberName, SubscriberCallbackInterface subscriber) throws RemoteException {
+        Topic topic;
+        synchronized (this) {
+            topic = topics.get(topicId);
+            if (topic == null) {
+                String topicInfo = getTopicInfoFromOtherBrokers(topicId);
+                if (topicInfo != null) {
+                    String[] parts = topicInfo.split("\\s+");
+                    String topicName = parts[1];
+                    String publisherName = parts[2];
+                    topic = new Topic(topicId, topicName, publisherName, this);
+                    topics.put(topicId, topic);
+                } else {
+                    return "error: Topic not found: " + topicId;
+                }
             }
+            topic.addSubscriber(subscriberName, subscriber);
+            subscriberTopics.computeIfAbsent(subscriberName, k -> ConcurrentHashMap.newKeySet()).add(topicId);
+            topicSubscribersOnBrokers.computeIfAbsent(topicId, k -> ConcurrentHashMap.newKeySet()).add(brokerIdentifier);
         }
-        topic.addSubscriber(subscriberName, subscriber);
-        subscriberTopics.computeIfAbsent(subscriberName, k -> ConcurrentHashMap.newKeySet()).add(topicId);
-        topicSubscribersOnBrokers.computeIfAbsent(topicId, k -> ConcurrentHashMap.newKeySet()).add(brokerIdentifier);
         synchronizeSubscriptionWithOthers(topicId, subscriberName, "subscribe");
         return "success";
     }
 
     @Override
-    public synchronized void synchronizeSubscription(String topicId, String subscriberName, String action, String brokerId) throws RemoteException {
-        if (action.equals("subscribe")) {
-
-            if (!topics.containsKey(topicId)) {
-                BrokerInterface broker = otherBrokers.get(brokerId);
-                if (broker != null) {
-                    try {
-                        String topicInfo = broker.getTopicInfo(topicId);
-                        if (topicInfo != null) {
-                            String[] parts = topicInfo.split("\\s+");
-                            String topicName = parts[1];
-                            String publisherName = parts[2];
-                            Topic topic = new Topic(topicId, topicName, publisherName);
-                            topics.put(topicId, topic);
+    public void synchronizeSubscription(String topicId, String subscriberName, String action, String brokerId) throws RemoteException {
+        synchronized (this) {
+            if (action.equals("subscribe")) {
+                if (!topics.containsKey(topicId)) {
+                    BrokerInterface broker = otherBrokers.get(brokerId);
+                    if (broker != null) {
+                        try {
+                            String topicInfo = broker.getTopicInfo(topicId);
+                            if (topicInfo != null) {
+                                String[] parts = topicInfo.split("\\s+");
+                                String topicName = parts[1];
+                                String publisherName = parts[2];
+                                Topic topic = new Topic(topicId, topicName, publisherName, this);
+                                topics.put(topicId, topic);
+                            }
+                        } catch (RemoteException e) {
+                            System.err.println("Failed to get topic info from broker " + brokerId + ": " + e.getMessage());
                         }
-                    } catch (RemoteException e) {
-                        System.err.println("Failed to get topic info from broker " + brokerId + ": " + e.getMessage());
+                    }
+                }
+                topicSubscribersOnBrokers.computeIfAbsent(topicId, k -> ConcurrentHashMap.newKeySet()).add(brokerId);
+            } else if (action.equals("unsubscribe")) {
+                Set<String> brokersSet = topicSubscribersOnBrokers.get(topicId);
+                if (brokersSet != null) {
+                    brokersSet.remove(brokerId);
+                    if (brokersSet.isEmpty()) {
+                        topicSubscribersOnBrokers.remove(topicId);
                     }
                 }
             }
-            topicSubscribersOnBrokers.computeIfAbsent(topicId, k -> ConcurrentHashMap.newKeySet()).add(brokerId);
-        } else if (action.equals("unsubscribe")) {
+        }
+    }
+
+    public void removeSubscriberFromBroker(String subscriberName, String topicId) {
+        synchronized (this) {
+            Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
+            if (subscribedTopics != null) {
+                subscribedTopics.remove(topicId);
+                if (subscribedTopics.isEmpty()) {
+                    subscriberTopics.remove(subscriberName);
+                }
+            }
             Set<String> brokersSet = topicSubscribersOnBrokers.get(topicId);
             if (brokersSet != null) {
-                brokersSet.remove(brokerId);
+                brokersSet.remove(brokerIdentifier);
                 if (brokersSet.isEmpty()) {
                     topicSubscribersOnBrokers.remove(topicId);
                 }
@@ -293,7 +331,7 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
         }
     }
 
-    private void synchronizeSubscriptionWithOthers(String topicId, String subscriberName, String action) {
+    public void synchronizeSubscriptionWithOthers(String topicId, String subscriberName, String action) {
         for (Map.Entry<String, BrokerInterface> entry : otherBrokers.entrySet()) {
             String brokerId = entry.getKey();
             BrokerInterface broker = entry.getValue();
@@ -307,40 +345,31 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized String unsubscribe(String topicId, String subscriberName) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-            return "error: Topic not found: " + topicId;
-        }
-        topic.removeSubscriber(subscriberName);
-        Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
-        if (subscribedTopics != null) {
-            subscribedTopics.remove(topicId);
-            if (subscribedTopics.isEmpty()) {
-                subscriberTopics.remove(subscriberName);
+    public String unsubscribe(String topicId, String subscriberName) throws RemoteException {
+        synchronized (this) {
+            Topic topic = topics.get(topicId);
+            if (topic == null) {
+                return "error: Topic not found: " + topicId;
             }
-        }
-        Set<String> brokersSet = topicSubscribersOnBrokers.get(topicId);
-        if (brokersSet != null) {
-            brokersSet.remove(brokerIdentifier);
-            if (brokersSet.isEmpty()) {
-                topicSubscribersOnBrokers.remove(topicId);
-            }
+            topic.removeSubscriber(subscriberName);
+            removeSubscriberFromBroker(subscriberName, topicId);
         }
         synchronizeSubscriptionWithOthers(topicId, subscriberName, "unsubscribe");
         return "success";
     }
 
     @Override
-    public synchronized List<String> getCurrentSubscriptions(String subscriberName) throws RemoteException {
+    public List<String> getCurrentSubscriptions(String subscriberName) throws RemoteException {
         List<String> subscriptions = new ArrayList<>();
-        Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
-        if (subscribedTopics != null) {
-            for (String topicId : subscribedTopics) {
-                Topic topic = topics.get(topicId);
-                if (topic != null) {
-                    String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
-                    subscriptions.add(entry);
+        synchronized (this) {
+            Set<String> subscribedTopics = subscriberTopics.get(subscriberName);
+            if (subscribedTopics != null) {
+                for (String topicId : subscribedTopics) {
+                    Topic topic = topics.get(topicId);
+                    if (topic != null) {
+                        String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
+                        subscriptions.add(entry);
+                    }
                 }
             }
         }
@@ -348,13 +377,16 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized List<String> getSubscriberCount(String topicId, String publisherName) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-            return Collections.singletonList("error: Topic not found: " + topicId);
-        }
-        if (!topic.getPublisherName().equals(publisherName)) {
-            return Collections.singletonList("error: Unauthorized publisher: " + publisherName);
+    public List<String> getSubscriberCount(String topicId, String publisherName) throws RemoteException {
+        Topic topic;
+        synchronized (this) {
+            topic = topics.get(topicId);
+            if (topic == null) {
+                return Collections.singletonList("error: Topic not found: " + topicId);
+            }
+            if (!topic.getPublisherName().equals(publisherName)) {
+                return Collections.singletonList("error: Unauthorized publisher: " + publisherName);
+            }
         }
         int totalSubscribers = topic.getSubscriberCount();
         Set<String> brokersSet = topicSubscribersOnBrokers.get(topicId);
@@ -377,34 +409,42 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized int getLocalSubscriberCount(String topicId) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        return (topic != null) ? topic.getSubscriberCount() : 0;
+    public int getLocalSubscriberCount(String topicId) throws RemoteException {
+        synchronized (this) {
+            Topic topic = topics.get(topicId);
+            return (topic != null) ? topic.getSubscriberCount() : 0;
+        }
     }
 
     @Override
-    public synchronized String deleteTopic(String topicId, String publisherName) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic == null) {
-            return "error: Topic not found: " + topicId;
-        }
-        if (!topic.getPublisherName().equals(publisherName)) {
-            return "error: Unauthorized publisher: " + publisherName;
-        }
-        notifySubscribersOfTopicDeletion(topic);
-        topics.remove(topicId);
-        Set<String> publisherTopicSet = publisherTopics.get(publisherName);
-        if (publisherTopicSet != null) {
-            publisherTopicSet.remove(topicId);
-            if (publisherTopicSet.isEmpty()) {
-                publisherTopics.remove(publisherName);
+    public String deleteTopic(String topicId, String publisherName) throws RemoteException {
+        checkPublisher(publisherName);
+
+        Topic topic;
+        synchronized (this) {
+            topic = topics.get(topicId);
+            if (topic == null) {
+                return "error: Topic not found: " + topicId;
             }
+            if (!topic.getPublisherName().equals(publisherName)) {
+                return "error: Unauthorized publisher: " + publisherName;
+            }
+
+            topic.notifySubscribersOfTopicDeletion();
+            topics.remove(topicId);
+            Set<String> publisherTopicSet = publisherTopics.get(publisherName);
+            if (publisherTopicSet != null) {
+                publisherTopicSet.remove(topicId);
+                if (publisherTopicSet.isEmpty()) {
+                    publisherTopics.remove(publisherName);
+                }
+            }
+            for (Set<String> subscribedTopics : subscriberTopics.values()) {
+                subscribedTopics.remove(topicId);
+            }
+            subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+            topicSubscribersOnBrokers.remove(topicId);
         }
-        for (Set<String> subscribedTopics : subscriberTopics.values()) {
-            subscribedTopics.remove(topicId);
-        }
-        subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
-        topicSubscribersOnBrokers.remove(topicId);
         synchronizeTopicDeletionWithOthers(topicId);
         return "success";
     }
@@ -420,98 +460,214 @@ public class BrokerImpl extends UnicastRemoteObject implements BrokerInterface {
     }
 
     @Override
-    public synchronized void synchronizeTopicDeletion(String topicId) throws RemoteException {
-        Topic topic = topics.remove(topicId);
-        if (topic != null) {
-            String publisherName = topic.getPublisherName();
-            Set<String> publisherTopicSet = publisherTopics.get(publisherName);
-            if (publisherTopicSet != null) {
-                publisherTopicSet.remove(topicId);
-                if (publisherTopicSet.isEmpty()) {
-                    publisherTopics.remove(publisherName);
+    public void synchronizeTopicDeletion(String topicId) throws RemoteException {
+        synchronized (this) {
+            Topic topic = topics.remove(topicId);
+            if (topic != null) {
+                String publisherName = topic.getPublisherName();
+                Set<String> publisherTopicSet = publisherTopics.get(publisherName);
+                if (publisherTopicSet != null) {
+                    publisherTopicSet.remove(topicId);
+                    if (publisherTopicSet.isEmpty()) {
+                        publisherTopics.remove(publisherName);
+                    }
                 }
-            }
-            for (Set<String> subscribedTopics : subscriberTopics.values()) {
-                subscribedTopics.remove(topicId);
-            }
-            subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
-            topicSubscribersOnBrokers.remove(topicId);
-        }
-    }
-
-    private void notifySubscribersOfTopicDeletion(Topic topic) {
-        String message = "Topic " + topic.getTopicName() + " (ID: " + topic.getTopicId() + ") has been deleted.";
-        Map<String, SubscriberCallbackInterface> subscribers = topic.getSubscribers();
-        for (Map.Entry<String, SubscriberCallbackInterface> entry : subscribers.entrySet()) {
-            String subscriberName = entry.getKey();
-            SubscriberCallbackInterface subscriber = entry.getValue();
-            try {
-                subscriber.notifySubscriber(topic.getTopicId(), topic.getTopicName(), topic.getPublisherName(), message);
-            } catch (RemoteException e) {
-                System.err.println("Failed to notify subscriber " + subscriberName + " of topic deletion: " + e.getMessage());
+                for (Set<String> subscribedTopics : subscriberTopics.values()) {
+                    subscribedTopics.remove(topicId);
+                }
+                subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+                topicSubscribersOnBrokers.remove(topicId);
             }
         }
     }
 
-    @Override
-    public String getBrokerIdentifier() throws RemoteException {
-        return brokerIdentifier;
-    }
 
     @Override
-    public List<String> getKnownBrokers() throws RemoteException {
-        List<String> knownBrokerIdentifiers = new ArrayList<>(otherBrokers.keySet());
-        knownBrokerIdentifiers.add(brokerIdentifier);
-        return knownBrokerIdentifiers;
-    }
-
-    @Override
-    public synchronized List<String> getAllTopics() throws RemoteException {
+    public List<String> getAllTopics() throws RemoteException {
         List<String> topicList = new ArrayList<>();
-        for (Topic topic : topics.values()) {
-            String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
-            topicList.add(entry);
+        synchronized (this) {
+            for (Topic topic : topics.values()) {
+                String entry = topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
+                topicList.add(entry);
+            }
         }
         return topicList;
     }
 
     @Override
-    public synchronized String getTopicInfo(String topicId) throws RemoteException {
-        Topic topic = topics.get(topicId);
-        if (topic != null) {
-            return topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
-        } else {
-            return null;
+    public String getTopicInfo(String topicId) throws RemoteException {
+        synchronized (this) {
+            Topic topic = topics.get(topicId);
+            if (topic != null) {
+                return topic.getTopicId() + " " + topic.getTopicName() + " " + topic.getPublisherName();
+            } else {
+                return null;
+            }
         }
     }
 
     @Override
     public String handlePublisherCrash(String publisherName) throws RemoteException {
-        Set<String> publisherTopicIds = publisherTopics.remove(publisherName);
-        if (publisherTopicIds != null) {
-            for (String topicId : publisherTopicIds) {
-                Topic topic = topics.remove(topicId);
-                if (topic != null) {
-                    notifySubscribersOfTopicDeletion(topic);
-                    for (Set<String> subscribedTopics : subscriberTopics.values()) {
-                        subscribedTopics.remove(topicId);
+        System.err.println("Handling publisher crash for: " + publisherName);
+
+        synchronized (this) {
+            publisherHeartbeats.remove(publisherName);
+
+            Set<String> publisherTopicIds = publisherTopics.remove(publisherName);
+            if (publisherTopicIds != null) {
+                for (String topicId : publisherTopicIds) {
+                    Topic topic = topics.remove(topicId);
+                    if (topic != null) {
+                        topic.notifySubscribersOfTopicDeletion();
+                        for (Set<String> subscribedTopics : subscriberTopics.values()) {
+                            subscribedTopics.remove(topicId);
+                        }
+                        subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+                        topicSubscribersOnBrokers.remove(topicId);
                     }
-                    subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
-                    topicSubscribersOnBrokers.remove(topicId);
                 }
             }
         }
+
         synchronizePublisherCrashWithOthers(publisherName);
+
         return "success";
     }
 
     private void synchronizePublisherCrashWithOthers(String publisherName) {
         for (BrokerInterface broker : otherBrokers.values()) {
             try {
-                broker.handlePublisherCrash(publisherName);
+                broker.handlePublisherCrashLocal(publisherName);
             } catch (RemoteException e) {
                 System.err.println("Failed to synchronize publisher crash: " + e.getMessage());
             }
         }
+    }
+
+    @Override
+    public void handlePublisherCrashLocal(String publisherName) throws RemoteException {
+        System.err.println("Handling local publisher crash for: " + publisherName);
+
+        synchronized (this) {
+            publisherHeartbeats.remove(publisherName);
+
+            Set<String> publisherTopicIds = publisherTopics.remove(publisherName);
+            if (publisherTopicIds != null) {
+                for (String topicId : publisherTopicIds) {
+                    Topic topic = topics.remove(topicId);
+                    if (topic != null) {
+                        topic.notifySubscribersOfTopicDeletion();
+                        for (Set<String> subscribedTopics : subscriberTopics.values()) {
+                            subscribedTopics.remove(topicId);
+                        }
+                        subscriberTopics.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+                        topicSubscribersOnBrokers.remove(topicId);
+                    }
+                }
+            }
+        }
+    }
+
+    private void checkPublisher(String publisherName) throws RemoteException {
+        Long lastHeartbeat = publisherHeartbeats.get(publisherName);
+        if (lastHeartbeat != null) {
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastHeartbeat <= 6000) {
+                return;
+            }
+        }
+
+        handlePublisherCrash(publisherName);
+        throw new RemoteException("Publisher " + publisherName + " is not available.");
+    }
+
+    @Override
+    public void publisherHeartbeat(String publisherName) throws RemoteException {
+        publisherHeartbeats.put(publisherName, System.currentTimeMillis());
+    }
+
+    private void startPublisherHeartbeatChecker() {
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(3000);
+                    long currentTime = System.currentTimeMillis();
+                    for (Map.Entry<String, Long> entry : publisherHeartbeats.entrySet()) {
+                        String publisherName = entry.getKey();
+                        long lastHeartbeat = entry.getValue();
+                        if (currentTime - lastHeartbeat > 6000) {
+                            System.out.println("Publisher " + publisherName + " has crashed or disconnected.");
+                            handlePublisherCrash(publisherName);
+                            publisherHeartbeats.remove(publisherName);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    System.err.println("Publisher heartbeat checker interrupted: " + e.getMessage());
+                    break;
+                } catch (RemoteException e) {
+                    System.err.println("Failed to handle publisher crash: " + e.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    @Override
+    public void subscriberHeartbeat(String subscriberName) throws RemoteException {
+        subscriberHeartbeats.put(subscriberName, System.currentTimeMillis());
+    }
+
+    private void startSubscriberHeartbeatChecker() {
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(3000); // test every 3 seconds
+                    long currentTime = System.currentTimeMillis();
+                    for (Map.Entry<String, Long> entry : subscriberHeartbeats.entrySet()) {
+                        String subscriberName = entry.getKey();
+                        long lastHeartbeat = entry.getValue();
+                        if (currentTime - lastHeartbeat > 6000) {
+                            System.out.println("Subscriber " + subscriberName + " has crashed or disconnected.");
+                            handleSubscriberCrash(subscriberName);
+                            subscriberHeartbeats.remove(subscriberName);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    System.err.println("Subscriber heartbeat checker interrupted: " + e.getMessage());
+                    break;
+                }
+            }
+        }).start();
+    }
+
+    private void handleSubscriberCrash(String subscriberName) {
+
+        Set<String> subscribedTopics;
+        synchronized (this) {
+            subscribedTopics = subscriberTopics.remove(subscriberName);
+            if (subscribedTopics != null) {
+                for (String topicId : subscribedTopics) {
+
+                    Topic topic = topics.get(topicId);
+                    if (topic != null) {
+                        topic.removeSubscriber(subscriberName);
+                    }
+
+                    Set<String> brokersSet = topicSubscribersOnBrokers.get(topicId);
+                    if (brokersSet != null) {
+                        brokersSet.remove(brokerIdentifier);
+                        if (brokersSet.isEmpty()) {
+                            topicSubscribersOnBrokers.remove(topicId);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (subscribedTopics != null) {
+            for (String topicId : subscribedTopics) {
+                synchronizeSubscriptionWithOthers(topicId, subscriberName, "unsubscribe");
+            }
+        }
+        System.out.println("Handled subscriber crash for " + subscriberName);
     }
 }

@@ -14,6 +14,7 @@ public interface BrokerInterface extends Remote {
     List<String> getSubscriberCount(String topicId, String publisherName) throws RemoteException;
     String deleteTopic(String topicId, String publisherName) throws RemoteException;
     String handlePublisherCrash(String publisherName) throws RemoteException;
+    void handlePublisherCrashLocal(String publisherName) throws RemoteException; // 新增的方法
 
     // Subscriber methods
     List<String> listTopics() throws RemoteException;
@@ -27,11 +28,13 @@ public interface BrokerInterface extends Remote {
     void synchronizeSubscription(String topicId, String subscriberName, String action, String brokerId) throws RemoteException;
     void forwardMessage(String topicId, String message, String publisherName) throws RemoteException;
 
-    // Broker identification methods
-    String getBrokerIdentifier() throws RemoteException;
+
     int getLocalSubscriberCount(String topicId) throws RemoteException;
-    List<String> getKnownBrokers() throws RemoteException;
     List<String> getAllTopics() throws RemoteException;
     String getTopicInfo(String topicId) throws RemoteException;
     void registerNewBroker(String brokerId, String ip, int port) throws RemoteException;
+
+    // Heartbeat methods
+    void publisherHeartbeat(String publisherName) throws RemoteException;
+    void subscriberHeartbeat(String subscriberName) throws RemoteException;
 }

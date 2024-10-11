@@ -11,10 +11,12 @@ import java.util.Scanner;
 import java.util.List;
 import java.util.Random;
 
+
 public class SubscriberClient {
     private final String subscriberName;
     private BrokerInterface broker;
     private final Scanner scanner;
+    private volatile boolean isRunning = true;
 
     public SubscriberClient(String subscriberName, String directoryIp, int directoryPort) {
         this.subscriberName = subscriberName;
@@ -42,6 +44,9 @@ public class SubscriberClient {
 
             System.out.println("Connected to BrokerService at " + brokerInfo.getIp() + ":" + brokerInfo.getPort());
 
+            // 启动心跳线程
+            startHeartbeat();
+
         } catch (Exception e) {
             System.err.println("Unable to connect to BrokerService: " + e.getMessage());
             System.exit(1);
@@ -57,8 +62,9 @@ public class SubscriberClient {
             System.exit(1);
             return;
         }
-        while (true) {
-            System.out.println("Please select command: list, sub, current, unsub.");
+
+        while (isRunning) {
+            System.out.println("Please select command: list, sub, current, unsub");
             String commandLine = scanner.nextLine().trim();
             String[] parts = commandLine.split("\\s+", 2);
             if (parts.length == 0) {
@@ -88,8 +94,6 @@ public class SubscriberClient {
                         }
                         unsubscribeTopic(parts[1]);
                         break;
-                    case "exit":
-                        return;
                     default:
                         System.out.println("error: Invalid command.");
                 }
@@ -97,6 +101,7 @@ public class SubscriberClient {
                 System.out.println("error: " + e.getMessage());
             }
         }
+        System.out.println("Subscriber client exited.");
     }
 
     private void listTopics() throws Exception {
@@ -131,6 +136,21 @@ public class SubscriberClient {
     private void unsubscribeTopic(String topicId) throws Exception {
         String result = broker.unsubscribe(topicId, subscriberName);
         System.out.println("[" + result + "]");
+    }
+
+    private void startHeartbeat() {
+        new Thread(() -> {
+            while (isRunning) {
+                try {
+                    broker.subscriberHeartbeat(subscriberName);
+                    Thread.sleep(3000);
+                } catch (Exception e) {
+                    System.err.println("Failed to send heartbeat: " + e.getMessage());
+                    isRunning = false;
+                    break;
+                }
+            }
+        }).start();
     }
 
     public static void main(String[] args) {

@@ -1,7 +1,5 @@
 package directory;
 
-import remote.DirectoryServiceInterface;
-
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 

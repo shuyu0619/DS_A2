@@ -3,22 +3,25 @@ package broker;
 import remote.SubscriberCallbackInterface;
 
 import java.rmi.RemoteException;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Logger;
 
 public class Topic {
-    private static final Logger logger = Logger.getLogger(Topic.class.getName());
     private final String topicId;
     private final String topicName;
     private final String publisherName;
     private final ConcurrentHashMap<String, SubscriberCallbackInterface> subscribers;
 
-    public Topic(String topicId, String topicName, String publisherName) {
+
+    private final BrokerImpl broker;
+
+    public Topic(String topicId, String topicName, String publisherName, BrokerImpl broker) {
         this.topicId = topicId;
         this.topicName = topicName;
         this.publisherName = publisherName;
         this.subscribers = new ConcurrentHashMap<>();
+        this.broker = broker;
     }
 
     public String getTopicId() {
@@ -50,13 +53,45 @@ public class Topic {
     }
 
     public synchronized void publishMessage(String message) {
-        for (Map.Entry<String, SubscriberCallbackInterface> entry : subscribers.entrySet()) {
+        Iterator<Map.Entry<String, SubscriberCallbackInterface>> iterator = subscribers.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, SubscriberCallbackInterface> entry = iterator.next();
             String subscriberName = entry.getKey();
             SubscriberCallbackInterface subscriber = entry.getValue();
             try {
                 subscriber.notifySubscriber(topicId, topicName, publisherName, message);
             } catch (RemoteException e) {
-                subscribers.remove(subscriberName);
+                System.err.println("Subscriber " + subscriberName + " is unreachable. Removing from subscriber list.");
+                iterator.remove();
+
+
+                broker.removeSubscriberFromBroker(subscriberName, topicId);
+
+
+                broker.synchronizeSubscriptionWithOthers(topicId, subscriberName, "unsubscribe");
+            }
+        }
+    }
+
+
+    public synchronized void notifySubscribersOfTopicDeletion() {
+        String message = "Topic " + topicName + " (ID: " + topicId + ") has been deleted.";
+        Iterator<Map.Entry<String, SubscriberCallbackInterface>> iterator = subscribers.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, SubscriberCallbackInterface> entry = iterator.next();
+            String subscriberName = entry.getKey();
+            SubscriberCallbackInterface subscriber = entry.getValue();
+            try {
+                subscriber.notifySubscriber(topicId, topicName, publisherName, message);
+            } catch (RemoteException e) {
+                System.err.println("Subscriber " + subscriberName + " is unreachable during topic deletion. Removing from subscriber list.");
+                iterator.remove();
+
+
+                broker.removeSubscriberFromBroker(subscriberName, topicId);
+
+
+                broker.synchronizeSubscriptionWithOthers(topicId, subscriberName, "unsubscribe");
             }
         }
     }

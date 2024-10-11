@@ -14,6 +14,7 @@ public class PublisherClient {
     private final String publisherName;
     private BrokerInterface broker;
     private final Scanner scanner;
+    private volatile boolean isRunning = true;
 
     public PublisherClient(String publisherName, String directoryIp, int directoryPort) {
         this.publisherName = publisherName;
@@ -41,6 +42,9 @@ public class PublisherClient {
 
             System.out.println("Connected to BrokerService at " + brokerInfo.getIp() + ":" + brokerInfo.getPort());
 
+
+            startHeartbeat();
+
         } catch (Exception e) {
             System.err.println("Unable to connect to BrokerService: " + e.getMessage());
             System.exit(1);
@@ -48,8 +52,8 @@ public class PublisherClient {
     }
 
     public void start() {
-        while (true) {
-            System.out.println("Please select command: create, publish, show, delete.");
+        while (isRunning) {
+            System.out.println("Please select command: create, publish, show, delete");
             String commandLine = scanner.nextLine().trim();
             String[] parts = commandLine.split("\\s+", 3);
             if (parts.length == 0) {
@@ -87,8 +91,6 @@ public class PublisherClient {
                         }
                         deleteTopic(parts[1]);
                         break;
-                    case "exit":
-                        return;
                     default:
                         System.out.println("error: Invalid command.");
                 }
@@ -96,6 +98,7 @@ public class PublisherClient {
                 System.out.println("error: " + e.getMessage());
             }
         }
+        System.out.println("Publisher client exited.");
     }
 
     private void createTopic(String topicId, String topicName) throws Exception {
@@ -123,6 +126,22 @@ public class PublisherClient {
     private void deleteTopic(String topicId) throws Exception {
         String result = broker.deleteTopic(topicId, publisherName);
         System.out.println("[" + result + "]");
+    }
+
+
+    private void startHeartbeat() {
+        new Thread(() -> {
+            while (isRunning) {
+                try {
+                    broker.publisherHeartbeat(publisherName);
+                    Thread.sleep(3000);
+                } catch (Exception e) {
+                    System.err.println("Failed to send heartbeat: " + e.getMessage());
+                    isRunning = false;
+                    break;
+                }
+            }
+        }).start();
     }
 
     public static void main(String[] args) {
