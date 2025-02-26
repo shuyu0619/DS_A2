@@ -1,3 +1,5 @@
+[A2_Report_Shuyu.Chen.pdf](https://github.com/user-attachments/files/18978493/A2_Report_Shuyu.Chen.pdf)
+
 A brief description of the components of the system：
 I have implemented all the functionalities of the Assignment, including the bonus part.
 Deployment and Startup of My Project:
